@@ -5,7 +5,7 @@ version: '3'
 services:
 
   postgresql:
-    image: ghcr.io/openreplay/postgres:${POSTGRES_VERSION}
+    image: ghcr.io/openreplay/postgres:17
     container_name: postgres
     volumes:
       - pgdata:/bitnami/postgresql
@@ -14,10 +14,16 @@ services:
         aliases:
           - postgresql.db.svc.cluster.local
     environment:
-      POSTGRESQL_PASSWORD: "${COMMON_PG_PASSWORD}"
+      POSTGRESQL_PASSWORD: "11b33d76836070b7cc18"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   clickhouse:
-    image: clickhouse/clickhouse-server:${CLICKHOUSE_VERSION}
+    image: clickhouse/clickhouse-server:25.11-alpine
     container_name: clickhouse
     volumes:
       - clickhouse:/var/lib/clickhouse
@@ -31,7 +37,7 @@ services:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
 
   redis:
-    image: ghcr.io/openreplay/valkey:${REDIS_VERSION}
+    image: ghcr.io/openreplay/valkey:8
     container_name: redis
     volumes:
       - redisdata:/data
@@ -43,7 +49,7 @@ services:
       ALLOW_EMPTY_PASSWORD: "yes"
 
   minio:
-    image: ghcr.io/openreplay/minio:${MINIO_VERSION}
+    image: ghcr.io/openreplay/minio:2025
     container_name: minio
     volumes:
       - miniodata:/bitnami/minio/data
@@ -54,8 +60,8 @@ services:
     ports:
       - 9001:9001
     environment:
-      MINIO_ROOT_USER: ${COMMON_S3_KEY}
-      MINIO_ROOT_PASSWORD: ${COMMON_S3_SECRET}
+      MINIO_ROOT_USER: e04a3c5e642d333e9cbc
+      MINIO_ROOT_PASSWORD: 80bb33c0b907172b30e0
 
   fs-permission:
     image: debian:stable-slim
@@ -74,7 +80,7 @@ services:
     restart: on-failure
 
   minio-migration:
-    image: ghcr.io/openreplay/minio:${MINIO_VERSION}
+    image: ghcr.io/openreplay/minio:2025
     container_name: minio-migration
     profiles:
       - "migration"
@@ -87,8 +93,8 @@ services:
       - ../helmcharts/openreplay/files/minio.sh:/tmp/minio.sh
     environment:
       MINIO_HOST: http://minio.db.svc.cluster.local:9000
-      MINIO_ACCESS_KEY: ${COMMON_S3_KEY}
-      MINIO_SECRET_KEY: ${COMMON_S3_SECRET}
+      MINIO_ACCESS_KEY: e04a3c5e642d333e9cbc
+      MINIO_SECRET_KEY: 80bb33c0b907172b30e0
     user: root
     entrypoint:
       - /bin/bash
@@ -103,7 +109,7 @@ services:
           bash /tmp/minio.sh init || exit 100
 
   db-migration:
-    image: ghcr.io/openreplay/postgres:${POSTGRES_VERSION}
+    image: ghcr.io/openreplay/postgres:17
     container_name: db-migration
     profiles:
       - "migration"
@@ -119,7 +125,7 @@ services:
       PGPORT: 5432
       PGDATABASE: postgres
       PGUSER: postgres
-      PGPASSWORD: ${COMMON_PG_PASSWORD}
+      PGPASSWORD: 11b33d76836070b7cc18
     entrypoint:
       - /bin/bash
       - -c
@@ -132,7 +138,7 @@ services:
           psql -v ON_ERROR_STOP=1 -f /tmp/init_schema.sql
 
   clickhouse-migration:
-    image: clickhouse/clickhouse-server:${CLICKHOUSE_VERSION}
+    image: clickhouse/clickhouse-server:25.11-alpine
     container_name: clickhouse-migration
     profiles:
       - "migration"
@@ -164,7 +170,7 @@ services:
           clickhouse-client -h clickhouse-openreplay-clickhouse.db.svc.cluster.local --user default --port 9000 --multiquery < /tmp/init_schema.sql || true
   
   alerts-openreplay:
-    image: public.ecr.aws/p1t3u8a3/alerts:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/alerts:v1.26.0
     domainname: app.svc.cluster.local
     container_name: alerts
     networks:
@@ -181,9 +187,12 @@ services:
   
   
   api-openreplay:
-    image: public.ecr.aws/p1t3u8a3/api:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/api:v1.26.0
     domainname: app.svc.cluster.local
     container_name: api
+    depends_on:
+      postgresql:
+        condition: service_healthy
     networks:
       openreplay-net:
         aliases:
@@ -191,6 +200,8 @@ services:
           - api-openreplay.app.svc.cluster.local
     volumes:
       - shared-volume:/mnt/efs
+      - ./wait-for-pg.sh:/scripts/wait-for-pg.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/wait-for-pg.sh"]
     env_file:
       - docker-envs/api.env
     environment: {}  # Fallback empty environment if env_file is missing
@@ -198,9 +209,12 @@ services:
   
   
   http-openreplay:
-    image: public.ecr.aws/p1t3u8a3/http:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/http:v1.26.0
     domainname: app.svc.cluster.local
     container_name: http
+    depends_on:
+      postgresql:
+        condition: service_healthy
     networks:
       openreplay-net:
         aliases:
@@ -208,14 +222,24 @@ services:
           - http-openreplay.app.svc.cluster.local
     volumes:
       - shared-volume:/mnt/efs
+      - ./wait-for-pg.sh:/scripts/wait-for-pg.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/wait-for-pg.sh"]
     env_file:
       - docker-envs/http.env
     environment: {}  # Fallback empty environment if env_file is missing
+
+    # managed-healthcheck (added by or-add-healthcheck.sh)
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "--timeout=3", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
   
   
   images-openreplay:
-    image: public.ecr.aws/p1t3u8a3/images:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/images:v1.26.0
     domainname: app.svc.cluster.local
     container_name: images
     networks:
@@ -232,9 +256,12 @@ services:
   
   
   integrations-openreplay:
-    image: public.ecr.aws/p1t3u8a3/integrations:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/integrations:v1.26.0
     domainname: app.svc.cluster.local
     container_name: integrations
+    depends_on:
+      postgresql:
+        condition: service_healthy
     networks:
       openreplay-net:
         aliases:
@@ -242,16 +269,29 @@ services:
           - integrations-openreplay.app.svc.cluster.local
     volumes:
       - shared-volume:/mnt/efs
+      - ./wait-for-pg.sh:/scripts/wait-for-pg.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/wait-for-pg.sh"]
     env_file:
       - docker-envs/integrations.env
     environment: {}  # Fallback empty environment if env_file is missing
+
+    # managed-healthcheck (added by or-add-healthcheck.sh)
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - --timeout=3 http://127.0.0.1:8080/ || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
   
   
   sink-openreplay:
-    image: public.ecr.aws/p1t3u8a3/sink:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/sink:v1.26.0
     domainname: app.svc.cluster.local
     container_name: sink
+    depends_on:
+      postgresql:
+        condition: service_healthy
     networks:
       openreplay-net:
         aliases:
@@ -259,6 +299,8 @@ services:
           - sink-openreplay.app.svc.cluster.local
     volumes:
       - shared-volume:/mnt/efs
+      - ./wait-for-pg.sh:/scripts/wait-for-pg.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/wait-for-pg.sh"]
     env_file:
       - docker-envs/sink.env
     environment: {}  # Fallback empty environment if env_file is missing
@@ -266,7 +308,7 @@ services:
   
   
   sourcemapreader-openreplay:
-    image: public.ecr.aws/p1t3u8a3/sourcemapreader:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/sourcemapreader:v1.26.0
     domainname: app.svc.cluster.local
     container_name: sourcemapreader
     networks:
@@ -283,9 +325,12 @@ services:
   
   
   spot-openreplay:
-    image: public.ecr.aws/p1t3u8a3/spot:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/spot:v1.26.0
     domainname: app.svc.cluster.local
     container_name: spot
+    depends_on:
+      postgresql:
+        condition: service_healthy
     networks:
       openreplay-net:
         aliases:
@@ -293,6 +338,8 @@ services:
           - spot-openreplay.app.svc.cluster.local
     volumes:
       - shared-volume:/mnt/efs
+      - ./wait-for-pg.sh:/scripts/wait-for-pg.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/wait-for-pg.sh"]
     env_file:
       - docker-envs/spot.env
     environment: {}  # Fallback empty environment if env_file is missing
@@ -300,9 +347,12 @@ services:
   
   
   storage-openreplay:
-    image: public.ecr.aws/p1t3u8a3/storage:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/storage:v1.26.0
     domainname: app.svc.cluster.local
     container_name: storage
+    depends_on:
+      postgresql:
+        condition: service_healthy
     networks:
       openreplay-net:
         aliases:
@@ -310,6 +360,8 @@ services:
           - storage-openreplay.app.svc.cluster.local
     volumes:
       - shared-volume:/mnt/efs
+      - ./wait-for-pg.sh:/scripts/wait-for-pg.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/wait-for-pg.sh"]
     env_file:
       - docker-envs/storage.env
     environment: {}  # Fallback empty environment if env_file is missing
@@ -317,7 +369,7 @@ services:
   
   
   assets-openreplay:
-    image: public.ecr.aws/p1t3u8a3/assets:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/assets:v1.26.0
     domainname: app.svc.cluster.local
     container_name: assets
     networks:
@@ -334,7 +386,7 @@ services:
   
   
   assist-openreplay:
-    image: public.ecr.aws/p1t3u8a3/assist:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/assist:v1.26.0
     domainname: app.svc.cluster.local
     container_name: assist
     networks:
@@ -351,9 +403,12 @@ services:
   
   
   canvases-openreplay:
-    image: public.ecr.aws/p1t3u8a3/canvases:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/canvases:v1.26.0
     domainname: app.svc.cluster.local
     container_name: canvases
+    depends_on:
+      postgresql:
+        condition: service_healthy
     networks:
       openreplay-net:
         aliases:
@@ -361,6 +416,8 @@ services:
           - canvases-openreplay.app.svc.cluster.local
     volumes:
       - shared-volume:/mnt/efs
+      - ./wait-for-pg.sh:/scripts/wait-for-pg.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/wait-for-pg.sh"]
     env_file:
       - docker-envs/canvases.env
     environment: {}  # Fallback empty environment if env_file is missing
@@ -368,7 +425,7 @@ services:
   
   
   chalice-openreplay:
-    image: public.ecr.aws/p1t3u8a3/chalice:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/chalice:v1.26.0
     domainname: app.svc.cluster.local
     container_name: chalice
     networks:
@@ -381,13 +438,24 @@ services:
     env_file:
       - docker-envs/chalice.env
     environment: {}  # Fallback empty environment if env_file is missing
+
+    # managed-healthcheck (added by or-add-healthcheck.sh)
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - --timeout=3 http://127.0.0.1:8000/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
   
   
   db-openreplay:
-    image: public.ecr.aws/p1t3u8a3/db:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/db:v1.26.0
     domainname: app.svc.cluster.local
     container_name: db
+    depends_on:
+      postgresql:
+        condition: service_healthy
     networks:
       openreplay-net:
         aliases:
@@ -395,6 +463,8 @@ services:
           - db-openreplay.app.svc.cluster.local
     volumes:
       - shared-volume:/mnt/efs
+      - ./wait-for-pg.sh:/scripts/wait-for-pg.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/wait-for-pg.sh"]
     env_file:
       - docker-envs/db.env
     environment: {}  # Fallback empty environment if env_file is missing
@@ -402,9 +472,12 @@ services:
   
   
   ender-openreplay:
-    image: public.ecr.aws/p1t3u8a3/ender:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/ender:v1.26.0
     domainname: app.svc.cluster.local
     container_name: ender
+    depends_on:
+      postgresql:
+        condition: service_healthy
     networks:
       openreplay-net:
         aliases:
@@ -412,6 +485,8 @@ services:
           - ender-openreplay.app.svc.cluster.local
     volumes:
       - shared-volume:/mnt/efs
+      - ./wait-for-pg.sh:/scripts/wait-for-pg.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/wait-for-pg.sh"]
     env_file:
       - docker-envs/ender.env
     environment: {}  # Fallback empty environment if env_file is missing
@@ -419,7 +494,7 @@ services:
   
   
   frontend-openreplay:
-    image: public.ecr.aws/p1t3u8a3/frontend:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/frontend:v1.26.0
     domainname: app.svc.cluster.local
     container_name: frontend
     networks:
@@ -432,11 +507,19 @@ services:
     env_file:
       - docker-envs/frontend.env
     environment: {}  # Fallback empty environment if env_file is missing
+
+    # managed-healthcheck (added by or-add-healthcheck.sh)
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - --timeout=3 http://127.0.0.1:8080/ || wget -q -O - --timeout=3 http://localhost/ || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
   
   
   heuristics-openreplay:
-    image: public.ecr.aws/p1t3u8a3/heuristics:${COMMON_VERSION}
+    image: public.ecr.aws/p1t3u8a3/heuristics:v1.26.0
     domainname: app.svc.cluster.local
     container_name: heuristics
     networks:
@@ -476,7 +559,7 @@ services:
       - openreplay-net
     environment:
       - ACME_AGREE=true # Agree to Let's Encrypt Subscriber Agreement
-      - CADDY_DOMAIN=${CADDY_DOMAIN}
+      - CADDY_DOMAIN=replays.belamiecommerce.com
     restart: unless-stopped
 
 
