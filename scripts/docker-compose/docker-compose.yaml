@@ -406,7 +406,7 @@ services:
     environment: {}
     restart: unless-stopped
   chalice-openreplay:
-    image: public.ecr.aws/p1t3u8a3/chalice:v1.26.0
+    image: belami/chalice:1.26.0-cfsso
     domainname: app.svc.cluster.local
     container_name: chalice-sandbox
     networks:
@@ -473,7 +473,7 @@ services:
     environment: {}
     restart: unless-stopped
   frontend-openreplay:
-    image: public.ecr.aws/p1t3u8a3/frontend:v1.26.0
+    image: belami/frontend:1.26.0-cfsso
     domainname: app.svc.cluster.local
     container_name: frontend-sandbox
     networks:

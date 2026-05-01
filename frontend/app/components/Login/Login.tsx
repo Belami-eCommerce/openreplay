@@ -75,6 +75,30 @@ function Login({
     }
   }, [authDetails]);
 
+  // Belami: CF Access trusted-header SSO. On mount, try the chalice fork's
+  // /api/cf-sso/login endpoint. If CF Access already authenticated the user
+  // at the edge, the backend reads Cf-Access-Authenticated-User-Email and
+  // mints an OpenReplay session JWT, which we feed through the same syntheticLogin
+  // path the password flow uses. On 401/404, fall through to the password form.
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/cf-sso/login', { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((resp) => {
+        if (cancelled || !resp || !resp.jwt) return;
+        userStore.syntheticLogin(resp);
+        setJwt({ jwt: resp.jwt, spotJwt: resp.spotJwt ?? null });
+        if (resp.spotJwt) handleSpotLogin(resp.spotJwt);
+      })
+      .catch(() => {
+        // SSO not enabled or upstream header missing -- silent fall-through
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+
   useEffect(() => {
     const jwt = params.get('jwt');
     const spotJwt = params.get('spotJwt');
