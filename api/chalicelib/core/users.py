@@ -834,3 +834,80 @@ def update_user_settings(user_id, settings):
                 {"user_id": user_id, "settings": json.dumps(settings)})
         )
         return helper.dict_to_camel_case(cur.fetchone())
+
+# ============================================================================
+# Belami: CF Access trusted-header SSO helpers
+# ============================================================================
+# These functions support the Cloudflare Access "trust the proxy" auth model:
+# CF Access authenticates the user with Entra at the edge, then forwards the
+# verified email in a request header. OpenReplay reads that header, looks up
+# (or auto-provisions) the user, and mints its normal session JWT.
+#
+# Security note: relies on the chalice service being unreachable except via
+# the CF Tunnel -> caddy(127.0.0.1:9080) -> nginx -> chalice path. If you
+# expose chalice's port, anyone can forge the email header. Keep it loopback.
+# ============================================================================
+
+def get_or_provision_sso_user(email, name=None):
+    """Look up by email; auto-provision as member if missing. Returns user dict (camelCase) or None."""
+    if not email:
+        return None
+    email = email.strip().lower()
+    if not name:
+        name = email.split('@', 1)[0]
+
+    with pg_client.PostgresClient() as cur:
+        cur.execute(cur.mogrify(
+            """SELECT users.user_id,
+                      1 AS tenant_id,
+                      users.role,
+                      users.name,
+                      users.email,
+                      (CASE WHEN users.role = 'owner' THEN TRUE ELSE FALSE END)  AS super_admin,
+                      (CASE WHEN users.role = 'admin' THEN TRUE ELSE FALSE END)  AS admin,
+                      (CASE WHEN users.role = 'member' THEN TRUE ELSE FALSE END) AS member
+               FROM public.users
+               WHERE users.email = %(email)s AND users.deleted_at IS NULL
+               LIMIT 1;""",
+            {'email': email}))
+        existing = cur.fetchone()
+        if existing:
+            return helper.dict_to_camel_case(existing)
+
+    # Not found: provision as member (no admin/owner). Reuses create_new_member which
+    # also seeds an entry in basic_authentication; the invitation_token is unused for
+    # SSO users but the row needs to exist for downstream queries that join it.
+    invitation_token = secrets.token_urlsafe(64)
+    new_user = create_new_member(email=email, invitation_token=invitation_token,
+                                  admin=False, name=name, owner=False)
+    if new_user:
+        new_user['tenantId'] = 1
+    return new_user
+
+
+def authenticate_sso(email, name=None):
+    """Authenticate via upstream SSO (CF Access). Returns the same token bundle as authenticate()."""
+    user = get_or_provision_sso_user(email=email, name=name)
+    if not user:
+        return None
+
+    user_id = user['userId']
+    tenant_id = user.get('tenantId', 1)
+    j_r = change_jwt_iat_jti(user_id=user_id)
+
+    response = {
+        'jwt': authorizers.generate_jwt(user_id=user_id, tenant_id=tenant_id, iat=j_r.jwt_iat, aud=AUDIENCE),
+        'refreshToken': authorizers.generate_jwt_refresh(user_id=user_id, tenant_id=tenant_id,
+                                                         iat=j_r.jwt_refresh_iat, aud=AUDIENCE,
+                                                         jwt_jti=j_r.jwt_refresh_jti, for_spot=False),
+        'refreshTokenMaxAge': config('JWT_REFRESH_EXPIRATION', cast=int),
+        'email': email,
+        'spotJwt': authorizers.generate_jwt(user_id=user_id, tenant_id=tenant_id,
+                                             iat=j_r.spot_jwt_iat, aud=spot.AUDIENCE, for_spot=True),
+        'spotRefreshToken': authorizers.generate_jwt_refresh(user_id=user_id, tenant_id=tenant_id,
+                                                              iat=j_r.spot_jwt_refresh_iat, aud=spot.AUDIENCE,
+                                                              jwt_jti=j_r.spot_jwt_refresh_jti, for_spot=True),
+        'spotRefreshTokenMaxAge': config('JWT_SPOT_REFRESH_EXPIRATION', cast=int),
+        **user,
+    }
+    return response

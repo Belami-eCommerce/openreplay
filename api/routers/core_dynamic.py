@@ -2,7 +2,7 @@ import logging
 from typing import Optional, Union
 
 from decouple import config
-from fastapi import Body, Depends, BackgroundTasks
+from fastapi import Body, Depends, BackgroundTasks, Request
 from fastapi import HTTPException, status
 from starlette.responses import RedirectResponse, FileResponse, JSONResponse, Response
 
@@ -96,6 +96,39 @@ def login_user(response: JSONResponse, data: schemas.UserLoginSchema = Body(...)
         )
     r = __process_authentication_response(response=response, data=r)
     return r
+
+
+@public_app.get('/cf-sso/login', tags=["authentication"])
+def login_via_cf_access(request: Request, response: JSONResponse):
+    """
+    Belami: trusted-header SSO via Cloudflare Access.
+
+    Reads `Cf-Access-Authenticated-User-Email` set by the CF Access edge,
+    auto-provisions the user as a member on first login, mints the OpenReplay
+    session (same JWT/cookie shape as POST /login).
+
+    Threat model: this endpoint trusts an upstream auth header. The chalice
+    service is only reachable via caddy on 127.0.0.1:9080 -> CF Tunnel, so
+    forging the header would require host compromise. JWT verification of
+    `Cf-Access-Jwt-Assertion` against CF JWKS is a v2 hardening step.
+
+    Gated by CF_SSO_ENABLED env var (default false).
+    """
+    if not config("CF_SSO_ENABLED", cast=bool, default=False):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CF SSO not enabled")
+
+    email = request.headers.get("Cf-Access-Authenticated-User-Email")
+    if not email:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="No upstream auth header present")
+
+    name = request.headers.get("Cf-Access-Authenticated-User-Name")
+    r = users.authenticate_sso(email=email, name=name)
+    if r is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail="SSO authentication failed")
+    return __process_authentication_response(response=response, data=r)
+
 
 
 @app.get('/logout', tags=["login"])
